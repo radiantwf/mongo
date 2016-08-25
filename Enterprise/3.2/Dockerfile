@@ -1,30 +1,3 @@
-# FROM debian:latest
-
-# RUN set -x \
-#     && apt-get update \
-#     && apt-get install -y --no-install-recommends \
-#         libgssapi-krb5-2 \
-#         libsasl2-2 \
-#         libssl1.0.0 \
-#         libstdc++6 \
-#         snmp \
-#         vim
-
-# RUN apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv EA312927 \
-#     && echo "deb http://repo.mongodb.com/apt/debian wheezy/mongodb-enterprise/3.2 main" | tee /etc/apt/sources.list.d/mongodb-enterprise.list \
-#     && apt-get update
-
-# RUN apt-get install -y --no-install-recommends \
-#         libsnmp15 \
-#         mongodb-enterprise=3.2.9 \
-#         mongodb-enterprise-server=3.2.9 \
-#         mongodb-enterprise-shell=3.2.9 \
-#         mongodb-enterprise-mongos=3.2.9 \
-#         mongodb-enterprise-tools=3.2.9
-
-# RUN rm -rf /var/lib/apt/lists/* \
-
-
 FROM debian:wheezy
 
 # add our user and group first to make sure their IDs get assigned consistently, regardless of whatever dependencies get added
