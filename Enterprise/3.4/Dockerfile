@@ -25,13 +25,13 @@ RUN set -x \
 # pub   4096R/A15703C6 2016-01-11 [expires: 2018-01-10]
 #       Key fingerprint = 0C49 F373 0359 A145 1858  5931 BC71 1F9B A157 03C6
 # uid                  MongoDB 3.4 Release Signing Key <packaging@mongodb.com>
-RUN apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 0C49F3730359A14518585931BC711F9BA15703C6
+RUN apt-key adv --keyserver ha.pool.sks-keyservers.net --recv-keys 0C49F3730359A14518585931BC711F9BA15703C6
 
 ENV MONGO_MAJOR 3.4
 ENV MONGO_VERSION 3.4.0
 ENV MONGO_PACKAGE mongodb-enterprise
 
-RUN echo "deb http://repo.mongodb.org/apt/debian jessie/mongodb-enterprise/$MONGO_MAJOR main" > /etc/apt/sources.list.d/mongodb-org.list
+RUN echo "deb http://repo.mongodb.com/apt/debian jessie/mongodb-enterprise/$MONGO_MAJOR main" > /etc/apt/sources.list.d/mongodb-org.list
 
 RUN set -x \
 	&& apt-get update \
