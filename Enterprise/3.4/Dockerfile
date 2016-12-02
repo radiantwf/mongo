@@ -31,7 +31,7 @@ ENV MONGO_MAJOR 3.4
 ENV MONGO_VERSION 3.4.0
 ENV MONGO_PACKAGE mongodb-enterprise
 
-RUN echo "deb http://repo.mongodb.org/apt/debian jessie/mongodb-org/$MONGO_MAJOR main" > /etc/apt/sources.list.d/mongodb-org.list
+RUN echo "deb http://repo.mongodb.org/apt/debian jessie/mongodb-enterprise/$MONGO_MAJOR main" > /etc/apt/sources.list.d/mongodb-org.list
 
 RUN set -x \
 	&& apt-get update \
