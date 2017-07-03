@@ -41,11 +41,18 @@ RUN set -ex; \
 	rm -r "$GNUPGHOME"; \
 	apt-key list
 
-ENV MONGO_MAJOR 3.4
-ENV MONGO_VERSION 3.4.4
-ENV MONGO_PACKAGE mongodb-enterprise
+# Allow build-time overrides (eg. to build image with MongoDB Enterprise version)
+# Options for MONGO_PACKAGE: mongodb-org OR mongodb-enterprise
+# Options for MONGO_REPO: repo.mongodb.org OR repo.mongodb.com
+# Example: docker build --build-arg MONGO_PACKAGE=mongodb-enterprise --build-arg MONGO_REPO=repo.mongodb.com .
+ARG MONGO_PACKAGE=mongodb-enterprise
+ARG MONGO_REPO=repo.mongodb.com
+ENV MONGO_PACKAGE=${MONGO_PACKAGE} MONGO_REPO=${MONGO_REPO}
 
-RUN echo "deb http://repo.mongodb.com/apt/debian jessie/mongodb-enterprise/$MONGO_MAJOR main" > /etc/apt/sources.list.d/mongodb-org.list
+ENV MONGO_MAJOR 3.4
+ENV MONGO_VERSION 3.4.5
+
+RUN echo "deb http://$MONGO_REPO/apt/debian jessie/${MONGO_PACKAGE%-unstable}/$MONGO_MAJOR main" | tee "/etc/apt/sources.list.d/${MONGO_PACKAGE%-unstable}.list"
 
 RUN set -x \
 	&& apt-get update \
