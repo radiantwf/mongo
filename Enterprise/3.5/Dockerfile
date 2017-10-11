@@ -27,10 +27,10 @@ RUN set -x \
 RUN mkdir /docker-entrypoint-initdb.d
 
 ENV GPG_KEYS \
-# pub   4096R/A15703C6 2016-01-11 [expires: 2018-01-10]
-#       Key fingerprint = 0C49 F373 0359 A145 1858  5931 BC71 1F9B A157 03C6
-# uid                  MongoDB 3.4 Release Signing Key <packaging@mongodb.com>
-	0C49F3730359A14518585931BC711F9BA15703C6
+# pub   4096R/91FA4AD5 2016-12-14 [expires: 2018-12-14]
+#       Key fingerprint = 2930 ADAE 8CAF 5059 EE73  BB4B 5871 2A22 91FA 4AD5
+# uid                  MongoDB 3.6 Release Signing Key <packaging@mongodb.com>
+	2930ADAE8CAF5059EE73BB4B58712A2291FA4AD5
 # https://docs.mongodb.com/manual/tutorial/verify-mongodb-packages/#download-then-import-the-key-file
 RUN set -ex; \
 	export GNUPGHOME="$(mktemp -d)"; \
@@ -49,8 +49,8 @@ ARG MONGO_PACKAGE=mongodb-enterprise
 ARG MONGO_REPO=repo.mongodb.com
 ENV MONGO_PACKAGE=${MONGO_PACKAGE} MONGO_REPO=${MONGO_REPO}
 
-ENV MONGO_MAJOR 3.4
-ENV MONGO_VERSION 3.4.9
+ENV MONGO_MAJOR 3.5
+ENV MONGO_VERSION 3.5.12
 
 RUN echo "deb http://$MONGO_REPO/apt/debian jessie/${MONGO_PACKAGE%-unstable}/$MONGO_MAJOR main" | tee "/etc/apt/sources.list.d/${MONGO_PACKAGE%-unstable}.list"
 
@@ -71,8 +71,7 @@ RUN mkdir -p /data/db /data/configdb \
 VOLUME /data/db /data/configdb
 
 COPY docker-entrypoint.sh /usr/local/bin/
-RUN ln -s usr/local/bin/docker-entrypoint.sh /entrypoint.sh # backwards compat
 ENTRYPOINT ["docker-entrypoint.sh"]
 
 EXPOSE 27017
-CMD ["mongod"]
+CMD ["mongod", "--bind_ip_all"]
