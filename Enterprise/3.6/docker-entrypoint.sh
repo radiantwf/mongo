@@ -66,6 +66,24 @@ _mongod_hack_have_arg() {
 	done
 	return 1
 }
+# _mongod_hack_get_arg_val '--some-arg' "$@"
+_mongod_hack_get_arg_val() {
+	local checkArg="$1"; shift
+	while [ "$#" -gt 0 ]; do
+		local arg="$1"; shift
+		case "$arg" in
+			"$checkArg")
+				echo "$1"
+				return 0
+				;;
+			"$checkArg"=*)
+				echo "${arg#$checkArg=}"
+				return 0
+				;;
+		esac
+	done
+	return 1
+}
 declare -a mongodHackedArgs
 # _mongod_hack_ensure_arg '--some-arg' "$@"
 # set -- "${mongodHackedArgs[@]}"
@@ -89,29 +107,75 @@ _mongod_hack_ensure_no_arg() {
 		mongodHackedArgs+=( "$arg" )
 	done
 }
-# _mongod_hack_ensure_arg_val '--some-arg' 'some-val' "$@"
+# _mongod_hack_ensure_no_arg '--some-unwanted-arg' "$@"
 # set -- "${mongodHackedArgs[@]}"
-_mongod_hack_ensure_arg_val() {
-	local ensureArg="$1"; shift
-	local ensureVal="$1"; shift
+_mongod_hack_ensure_no_arg_val() {
+	local ensureNoArg="$1"; shift
 	mongodHackedArgs=()
 	while [ "$#" -gt 0 ]; do
 		local arg="$1"; shift
 		case "$arg" in
-			"$ensureArg")
+			"$ensureNoArg")
 				shift # also skip the value
 				continue
 				;;
-			"$ensureArg"=*)
+			"$ensureNoArg"=*)
 				# value is already included
 				continue
 				;;
 		esac
 		mongodHackedArgs+=( "$arg" )
 	done
+}
+# _mongod_hack_ensure_arg_val '--some-arg' 'some-val' "$@"
+# set -- "${mongodHackedArgs[@]}"
+_mongod_hack_ensure_arg_val() {
+	local ensureArg="$1"; shift
+	local ensureVal="$1"; shift
+	_mongod_hack_ensure_no_arg_val "$ensureArg" "$@"
 	mongodHackedArgs+=( "$ensureArg" "$ensureVal" )
 }
-# TODO what do to about "--config" ? :(
+
+# _js_escape 'some "string" value'
+_js_escape() {
+	jq --null-input --arg 'str' "$1" '$str'
+}
+
+jsonConfigFile="${TMPDIR:-/tmp}/docker-entrypoint-config.json"
+tempConfigFile="${TMPDIR:-/tmp}/docker-entrypoint-temp-config.json"
+_parse_config() {
+	if [ -s "$tempConfigFile" ]; then
+		return 0
+	fi
+
+	local configPath
+	if configPath="$(_mongod_hack_get_arg_val --config "$@")"; then
+		# if --config is specified, parse it into a JSON file so we can remove a few problematic keys (especially SSL-related keys)
+		# see https://docs.mongodb.com/manual/reference/configuration-options/
+		mongo --norc --nodb --quiet --eval "load('/js-yaml.js'); printjson(jsyaml.load(cat($(_js_escape "$configPath"))))" > "$jsonConfigFile"
+		jq 'del(.systemLog, .processManagement, .net, .security)' "$jsonConfigFile" > "$tempConfigFile"
+		return 0
+	fi
+
+	return 1
+}
+dbPath=
+_dbPath() {
+	if [ -n "$dbPath" ]; then
+		echo "$dbPath"
+		return
+	fi
+
+	if ! dbPath="$(_mongod_hack_get_arg_val --dbpath "$@")"; then
+		if _parse_config "$@"; then
+			dbPath="$(jq '.storage.dbPath' "$jsonConfigFile")"
+		fi
+	fi
+
+	: "${dbPath:=/data/db}"
+
+	echo "$dbPath"
+}
 
 if [ "$originalArgOne" = 'mongod' ]; then
 	file_env 'MONGO_INITDB_ROOT_USERNAME'
@@ -145,11 +209,12 @@ if [ "$originalArgOne" = 'mongod' ]; then
 
 	# check for a few known paths (to determine whether we've already initialized and should thus skip our initdb scripts)
 	if [ -n "$shouldPerformInitdb" ]; then
+		dbPath="$(_dbPath "$@")"
 		for path in \
-			/data/db/WiredTiger \
-			/data/db/journal \
-			/data/db/local.0 \
-			/data/db/storage.bson \
+			"$dbPath/WiredTiger" \
+			"$dbPath/journal" \
+			"$dbPath/local.0" \
+			"$dbPath/storage.bson" \
 		; do
 			if [ -e "$path" ]; then
 				shouldPerformInitdb=
@@ -159,19 +224,20 @@ if [ "$originalArgOne" = 'mongod' ]; then
 	fi
 
 	if [ -n "$shouldPerformInitdb" ]; then
-		if _mongod_hack_have_arg --config "$@"; then
-			echo >&2
-			echo >&2 'warning: database is not yet initialized, and "--config" is specified'
-			echo >&2 '  the initdb database startup might fail as a result!'
-			echo >&2
+		mongodHackedArgs=( "$@" )
+		if _parse_config "$@"; then
+			_mongod_hack_ensure_arg_val --config "$tempConfigFile" "${mongodHackedArgs[@]}"
 		fi
-
-		pidfile="$(mktemp)"
-		trap "rm -f '$pidfile'" EXIT
-
-		_mongod_hack_ensure_arg_val --bind_ip 127.0.0.1 "$@"
+		_mongod_hack_ensure_arg_val --bind_ip 127.0.0.1 "${mongodHackedArgs[@]}"
 		_mongod_hack_ensure_arg_val --port 27017 "${mongodHackedArgs[@]}"
 		_mongod_hack_ensure_no_arg --bind_ip_all "${mongodHackedArgs[@]}"
+
+		# remove "--auth" and "--replSet" for our initial startup (see https://docs.mongodb.com/manual/tutorial/enable-authentication/#start-mongodb-without-access-control)
+		# https://github.com/docker-library/mongo/issues/211
+		_mongod_hack_ensure_no_arg --auth "${mongodHackedArgs[@]}"
+		if [ "$MONGO_INITDB_ROOT_USERNAME" ] && [ "$MONGO_INITDB_ROOT_PASSWORD" ]; then
+			_mongod_hack_ensure_no_arg_val --replSet "${mongodHackedArgs[@]}"
+		fi
 
 		sslMode="$(_mongod_hack_have_arg '--sslPEMKeyFile' "$@" && echo 'allowSSL' || echo 'disabled')" # "BadValue: need sslPEMKeyFile when SSL is enabled" vs "BadValue: need to enable SSL via the sslMode flag when using SSL configuration parameters"
 		_mongod_hack_ensure_arg_val --sslMode "$sslMode" "${mongodHackedArgs[@]}"
@@ -181,12 +247,16 @@ if [ "$originalArgOne" = 'mongod' ]; then
 			# https://github.com/docker-library/mongo/issues/164#issuecomment-293965668
 			_mongod_hack_ensure_arg_val --logpath "/proc/$$/fd/1" "${mongodHackedArgs[@]}"
 		else
-			echo >&2 "warning: initdb logs cannot write to '/proc/$$/fd/1', so they are in '/data/db/docker-initdb.log' instead"
-			_mongod_hack_ensure_arg_val --logpath /data/db/docker-initdb.log "${mongodHackedArgs[@]}"
+			initdbLogPath="$(_dbPath "$@")/docker-initdb.log"
+			echo >&2 "warning: initdb logs cannot write to '/proc/$$/fd/1', so they are in '$initdbLogPath' instead"
+			_mongod_hack_ensure_arg_val --logpath "$initdbLogPath" "${mongodHackedArgs[@]}"
 		fi
 		_mongod_hack_ensure_arg --logappend "${mongodHackedArgs[@]}"
 
+		pidfile="${TMPDIR:-/tmp}/docker-entrypoint-temp-mongod.pid"
+		rm -f "$pidfile"
 		_mongod_hack_ensure_arg_val --pidfilepath "$pidfile" "${mongodHackedArgs[@]}"
+
 		"${mongodHackedArgs[@]}" --fork
 
 		mongo=( mongo --host 127.0.0.1 --port 27017 --quiet )
@@ -221,17 +291,11 @@ if [ "$originalArgOne" = 'mongod' ]; then
 
 			"${mongo[@]}" "$rootAuthDatabase" <<-EOJS
 				db.createUser({
-					user: $(jq --arg 'user' "$MONGO_INITDB_ROOT_USERNAME" --null-input '$user'),
-					pwd: $(jq --arg 'pwd' "$MONGO_INITDB_ROOT_PASSWORD" --null-input '$pwd'),
-					roles: [ { role: 'root', db: $(jq --arg 'db' "$rootAuthDatabase" --null-input '$db') } ]
+					user: $(_js_escape "$MONGO_INITDB_ROOT_USERNAME"),
+					pwd: $(_js_escape "$MONGO_INITDB_ROOT_PASSWORD"),
+					roles: [ { role: 'root', db: $(_js_escape "$rootAuthDatabase") } ]
 				})
 			EOJS
-
-			mongo+=(
-				--username="$MONGO_INITDB_ROOT_USERNAME"
-				--password="$MONGO_INITDB_ROOT_PASSWORD"
-				--authenticationDatabase="$rootAuthDatabase"
-			)
 		fi
 
 		export MONGO_INITDB_DATABASE="${MONGO_INITDB_DATABASE:-test}"
@@ -247,15 +311,28 @@ if [ "$originalArgOne" = 'mongod' ]; then
 		done
 
 		"$@" --pidfilepath="$pidfile" --shutdown
-		rm "$pidfile"
-		trap - EXIT
+		rm -f "$pidfile"
 
 		echo
 		echo 'MongoDB init process complete; ready for start up.'
 		echo
 	fi
 
+	# MongoDB 3.6+ defaults to localhost-only binding
+	haveBindIp=
+	if _mongod_hack_have_arg --bind_ip "$@" || _mongod_hack_have_arg --bind_ip_all "$@"; then
+		haveBindIp=1
+	elif _parse_config "$@" && jq --exit-status '.net.bindIp // .net.bindIpAll' "$jsonConfigFile" > /dev/null; then
+		haveBindIp=1
+	fi
+	if [ -z "$haveBindIp" ]; then
+		# so if no "--bind_ip" is specified, let's add "--bind_ip_all"
+		set -- "$@" --bind_ip_all
+	fi
+
 	unset "${!MONGO_INITDB_@}"
 fi
+
+rm -f "$jsonConfigFile" "$tempConfigFile"
 
 exec "$@"
