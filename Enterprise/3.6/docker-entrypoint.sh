@@ -189,8 +189,10 @@ if [ "$originalArgOne" = 'mongod' ]; then
 		shouldPerformInitdb='true'
 	elif [ "$MONGO_INITDB_ROOT_USERNAME" ] || [ "$MONGO_INITDB_ROOT_PASSWORD" ]; then
 		cat >&2 <<-'EOF'
+
 			error: missing 'MONGO_INITDB_ROOT_USERNAME' or 'MONGO_INITDB_ROOT_PASSWORD'
 			       both must be specified for a user to be created
+
 		EOF
 		exit 1
 	fi
