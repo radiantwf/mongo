@@ -168,7 +168,7 @@ _dbPath() {
 
 	if ! dbPath="$(_mongod_hack_get_arg_val --dbpath "$@")"; then
 		if _parse_config "$@"; then
-			dbPath="$(jq '.storage.dbPath' "$jsonConfigFile")"
+			dbPath="$(jq -r '.storage.dbPath' "$jsonConfigFile")"
 		fi
 	fi
 
@@ -189,10 +189,8 @@ if [ "$originalArgOne" = 'mongod' ]; then
 		shouldPerformInitdb='true'
 	elif [ "$MONGO_INITDB_ROOT_USERNAME" ] || [ "$MONGO_INITDB_ROOT_PASSWORD" ]; then
 		cat >&2 <<-'EOF'
-
 			error: missing 'MONGO_INITDB_ROOT_USERNAME' or 'MONGO_INITDB_ROOT_PASSWORD'
 			       both must be specified for a user to be created
-
 		EOF
 		exit 1
 	fi
@@ -312,7 +310,7 @@ if [ "$originalArgOne" = 'mongod' ]; then
 			echo
 		done
 
-		"$@" --pidfilepath="$pidfile" --shutdown
+		"${mongodHackedArgs[@]}" --shutdown
 		rm -f "$pidfile"
 
 		echo
