@@ -178,4 +178,177 @@ _dbPath() {
 			&& clusterRole="$(jq -r '.sharding.clusterRole // empty' "$jsonConfigFile")" \
 			&& [ "$clusterRole" = 'configsvr' ]
 		}; then
-			# if running as config server, then the defaul
+			# if running as config server, then the default dbpath is /data/configdb
+			# https://docs.mongodb.com/manual/reference/program/mongod/#cmdoption-mongod-configsvr
+			dbPath=/data/configdb
+		fi
+	fi
+
+	: "${dbPath:=/data/db}"
+
+	echo "$dbPath"
+}
+
+if [ "$originalArgOne" = 'mongod' ]; then
+	file_env 'MONGO_INITDB_ROOT_USERNAME'
+	file_env 'MONGO_INITDB_ROOT_PASSWORD'
+	# pre-check a few factors to see if it's even worth bothering with initdb
+	shouldPerformInitdb=
+	if [ "$MONGO_INITDB_ROOT_USERNAME" ] && [ "$MONGO_INITDB_ROOT_PASSWORD" ]; then
+		# if we have a username/password, let's set "--auth"
+		_mongod_hack_ensure_arg '--auth' "$@"
+		set -- "${mongodHackedArgs[@]}"
+		shouldPerformInitdb='true'
+	elif [ "$MONGO_INITDB_ROOT_USERNAME" ] || [ "$MONGO_INITDB_ROOT_PASSWORD" ]; then
+		cat >&2 <<-'EOF'
+
+			error: missing 'MONGO_INITDB_ROOT_USERNAME' or 'MONGO_INITDB_ROOT_PASSWORD'
+			       both must be specified for a user to be created
+
+		EOF
+		exit 1
+	fi
+
+	if [ -z "$shouldPerformInitdb" ]; then
+		# if we've got any /docker-entrypoint-initdb.d/* files to parse later, we should initdb
+		for f in /docker-entrypoint-initdb.d/*; do
+			case "$f" in
+				*.sh|*.js) # this should match the set of files we check for below
+					shouldPerformInitdb="$f"
+					break
+					;;
+			esac
+		done
+	fi
+
+	# check for a few known paths (to determine whether we've already initialized and should thus skip our initdb scripts)
+	if [ -n "$shouldPerformInitdb" ]; then
+		dbPath="$(_dbPath "$@")"
+		for path in \
+			"$dbPath/WiredTiger" \
+			"$dbPath/journal" \
+			"$dbPath/local.0" \
+			"$dbPath/storage.bson" \
+		; do
+			if [ -e "$path" ]; then
+				shouldPerformInitdb=
+				break
+			fi
+		done
+	fi
+
+	if [ -n "$shouldPerformInitdb" ]; then
+		mongodHackedArgs=( "$@" )
+		if _parse_config "$@"; then
+			_mongod_hack_ensure_arg_val --config "$tempConfigFile" "${mongodHackedArgs[@]}"
+		fi
+		_mongod_hack_ensure_arg_val --bind_ip 127.0.0.1 "${mongodHackedArgs[@]}"
+		_mongod_hack_ensure_arg_val --port 27017 "${mongodHackedArgs[@]}"
+		_mongod_hack_ensure_no_arg --bind_ip_all "${mongodHackedArgs[@]}"
+
+		# remove "--auth" and "--replSet" for our initial startup (see https://docs.mongodb.com/manual/tutorial/enable-authentication/#start-mongodb-without-access-control)
+		# https://github.com/docker-library/mongo/issues/211
+		_mongod_hack_ensure_no_arg --auth "${mongodHackedArgs[@]}"
+		if [ "$MONGO_INITDB_ROOT_USERNAME" ] && [ "$MONGO_INITDB_ROOT_PASSWORD" ]; then
+			_mongod_hack_ensure_no_arg_val --replSet "${mongodHackedArgs[@]}"
+		fi
+
+		sslMode="$(_mongod_hack_have_arg '--sslPEMKeyFile' "$@" && echo 'allowSSL' || echo 'disabled')" # "BadValue: need sslPEMKeyFile when SSL is enabled" vs "BadValue: need to enable SSL via the sslMode flag when using SSL configuration parameters"
+		_mongod_hack_ensure_arg_val --sslMode "$sslMode" "${mongodHackedArgs[@]}"
+
+		if stat "/proc/$$/fd/1" > /dev/null && [ -w "/proc/$$/fd/1" ]; then
+			# https://github.com/mongodb/mongo/blob/38c0eb538d0fd390c6cb9ce9ae9894153f6e8ef5/src/mongo/db/initialize_server_global_state.cpp#L237-L251
+			# https://github.com/docker-library/mongo/issues/164#issuecomment-293965668
+			_mongod_hack_ensure_arg_val --logpath "/proc/$$/fd/1" "${mongodHackedArgs[@]}"
+		else
+			initdbLogPath="$(_dbPath "$@")/docker-initdb.log"
+			echo >&2 "warning: initdb logs cannot write to '/proc/$$/fd/1', so they are in '$initdbLogPath' instead"
+			_mongod_hack_ensure_arg_val --logpath "$initdbLogPath" "${mongodHackedArgs[@]}"
+		fi
+		_mongod_hack_ensure_arg --logappend "${mongodHackedArgs[@]}"
+
+		pidfile="${TMPDIR:-/tmp}/docker-entrypoint-temp-mongod.pid"
+		rm -f "$pidfile"
+		_mongod_hack_ensure_arg_val --pidfilepath "$pidfile" "${mongodHackedArgs[@]}"
+
+		"${mongodHackedArgs[@]}" --fork
+
+		mongo=( mongo --host 127.0.0.1 --port 27017 --quiet )
+
+		# check to see that our "mongod" actually did start up (catches "--help", "--version", MongoDB 3.2 being silly, slow prealloc, etc)
+		# https://jira.mongodb.org/browse/SERVER-16292
+		tries=30
+		while true; do
+			if ! { [ -s "$pidfile" ] && ps "$(< "$pidfile")" &> /dev/null; }; then
+				# bail ASAP if "mongod" isn't even running
+				echo >&2
+				echo >&2 "error: $originalArgOne does not appear to have stayed running -- perhaps it had an error?"
+				echo >&2
+				exit 1
+			fi
+			if "${mongo[@]}" 'admin' --eval 'quit(0)' &> /dev/null; then
+				# success!
+				break
+			fi
+			(( tries-- ))
+			if [ "$tries" -le 0 ]; then
+				echo >&2
+				echo >&2 "error: $originalArgOne does not appear to have accepted connections quickly enough -- perhaps it had an error?"
+				echo >&2
+				exit 1
+			fi
+			sleep 1
+		done
+
+		if [ "$MONGO_INITDB_ROOT_USERNAME" ] && [ "$MONGO_INITDB_ROOT_PASSWORD" ]; then
+			rootAuthDatabase='admin'
+
+			"${mongo[@]}" "$rootAuthDatabase" <<-EOJS
+				db.createUser({
+					user: $(_js_escape "$MONGO_INITDB_ROOT_USERNAME"),
+					pwd: $(_js_escape "$MONGO_INITDB_ROOT_PASSWORD"),
+					roles: [ { role: 'root', db: $(_js_escape "$rootAuthDatabase") } ]
+				})
+			EOJS
+		fi
+
+		export MONGO_INITDB_DATABASE="${MONGO_INITDB_DATABASE:-test}"
+
+		echo
+		for f in /docker-entrypoint-initdb.d/*; do
+			case "$f" in
+				*.sh) echo "$0: running $f"; . "$f" ;;
+				*.js) echo "$0: running $f"; "${mongo[@]}" "$MONGO_INITDB_DATABASE" "$f"; echo ;;
+				*)    echo "$0: ignoring $f" ;;
+			esac
+			echo
+		done
+
+		"${mongodHackedArgs[@]}" --shutdown
+		rm -f "$pidfile"
+
+		echo
+		echo 'MongoDB init process complete; ready for start up.'
+		echo
+	fi
+
+	# MongoDB 3.6+ defaults to localhost-only binding
+	if mongod --help 2>&1 | grep -q -- --bind_ip_all; then # TODO remove this conditional when 3.4 is no longer supported
+		haveBindIp=
+		if _mongod_hack_have_arg --bind_ip "$@" || _mongod_hack_have_arg --bind_ip_all "$@"; then
+			haveBindIp=1
+		elif _parse_config "$@" && jq --exit-status '.net.bindIp // .net.bindIpAll' "$jsonConfigFile" > /dev/null; then
+			haveBindIp=1
+		fi
+		if [ -z "$haveBindIp" ]; then
+			# so if no "--bind_ip" is specified, let's add "--bind_ip_all"
+			set -- "$@" --bind_ip_all
+		fi
+	fi
+
+	unset "${!MONGO_INITDB_@}"
+fi
+
+rm -f "$jsonConfigFile" "$tempConfigFile"
+
+exec "$@"
